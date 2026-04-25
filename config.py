@@ -24,6 +24,9 @@ MIN_RR             = float(os.environ.get('MIN_RR', '1.5'))
 # ── 每筆模擬倉位 (USDT) ──
 POSITION_USDT = float(os.environ.get('POSITION_USDT', '100'))
 
+# ── 槓桿倍數 (1~20，建議驗證期間用低槓桿) ──
+LEVERAGE = int(os.environ.get('LEVERAGE', '3'))
+
 CANDLE_LIMIT = 200
 
 # ── API 金鑰 (從環境變數讀取，不要寫死在程式裡) ──

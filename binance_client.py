@@ -96,6 +96,17 @@ def get_open_positions():
     return [p for p in data if float(p['positionAmt']) != 0]
 
 
+def set_leverage(symbol: str, leverage: int):
+    """設定槓桿倍數"""
+    try:
+        _signed_request('POST', '/fapi/v1/leverage', {
+            'symbol': symbol,
+            'leverage': leverage,
+        })
+    except Exception as e:
+        print(f"[Binance] set_leverage error: {e}")
+
+
 def place_market_order(symbol: str, side: str, usdt_amount: float):
     """
     下市價單

@@ -132,6 +132,7 @@ def analyze_symbol(symbol: str):
         # 下單條件：perfect + 殺戮區 + 強位移 + 未有持倉
         if _should_enter(s, kill, disp) and symbol not in _active_trades:
             side  = 'BUY' if s['dir'] == 'LONG' else 'SELL'
+            bc.set_leverage(symbol, config.LEVERAGE)
             order, actual_price, qty = bc.place_market_order(symbol, side, config.POSITION_USDT)
 
             if order and actual_price and qty:
