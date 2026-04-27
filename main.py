@@ -124,7 +124,8 @@ def analyze_symbol(symbol: str):
         if s['match'] == 'watch':
             continue
 
-        print(f"  策略{s['id']} match={s['match']} dir={s.get('dir')} rr={s.get('rr', 0):.1f if s.get('rr') else 'N/A'}")
+        rr_display = f"{s['rr']:.1f}" if s.get('rr') else 'N/A'
+        print(f"  策略{s['id']} match={s['match']} dir={s.get('dir')} rr={rr_display}")
 
         # 發送信號通知 (partial 和 perfect 都通知)
         ln.notify_signal(symbol, s, tfs, kill, disp)
