@@ -205,8 +205,7 @@ def build_smc_plan(candles, analysis):
     if internal['trend_bias'] == BULL: bs += 2
     elif internal['trend_bias'] == BEAR: ss += 2
     if last_sw:
-        if last_sw['type'] == 'CHoCH': bs += 3 if last_sw['dir'] == 'bull' else -3 + ss + 3
-        if last_sw['type'] == 'CHoCH' and last_sw['dir'] == 'bull': bs += 3
+        if   last_sw['type'] == 'CHoCH' and last_sw['dir'] == 'bull': bs += 3
         elif last_sw['type'] == 'CHoCH' and last_sw['dir'] == 'bear': ss += 3
         elif last_sw['type'] == 'BOS'   and last_sw['dir'] == 'bull': bs += 1
         elif last_sw['type'] == 'BOS'   and last_sw['dir'] == 'bear': ss += 1
@@ -323,7 +322,10 @@ def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis, ltf_ca
                       (top_fvg['type'] == 'bear' and mtf_analysis['swing']['trend_bias'] == BEAR)
         match = 'perfect' if dist_pct < 1.5 else 'partial' if dist_pct < 4 else 'watch'
         sl_price  = top_fvg['bottom'] * 0.998 if top_fvg['type'] == 'bull' else top_fvg['top'] * 1.002
-        tp_price  = plan.get('tp') or (ce + (ce - sl_price) * 2 if top_fvg['type'] == 'bull' else ce - (sl_price - ce) * 2)
+        # TP: 與 index.html 一致 — 用結構高低點（而非主計畫TP，主計畫方向可能與FVG方向相反）
+        tr_high = htf_analysis.get('tr_high', ce + abs(ce - sl_price) * 3)
+        tr_low  = htf_analysis.get('tr_low',  ce - abs(ce - sl_price) * 3)
+        tp_price  = tr_high if top_fvg['type'] == 'bull' else tr_low
         rr        = abs(tp_price - ce) / abs(ce - sl_price) if sl_price and tp_price else None
 
         strategies.append({

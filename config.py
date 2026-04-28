@@ -17,7 +17,7 @@ TF_MAP = {
 ACTIVE_STRATEGY = os.environ.get('ACTIVE_STRATEGY', 'A')
 
 # ── 進場門檻：只在 perfect 且殺戮區且強位移時才下單 ──
-REQUIRE_KILL_ZONE  = os.environ.get('REQUIRE_KILL_ZONE', 'true').lower() == 'true'
+REQUIRE_KILL_ZONE  = os.environ.get('REQUIRE_KILL_ZONE', 'false').lower() == 'true'
 REQUIRE_STRONG_DISP = os.environ.get('REQUIRE_STRONG_DISP', 'true').lower() == 'true'
 MIN_RR             = float(os.environ.get('MIN_RR', '1.5'))
 
