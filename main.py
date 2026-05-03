@@ -17,7 +17,17 @@ import adaptive_trend as at_module
 _last_candle_time: dict = {}
 
 # 記錄目前持倉中的交易 {symbol: trade_id}
+# 注意：啟動時由 _load_active_trades() 從 CSV 還原，避免重啟後失憶
 _active_trades: dict = {}
+
+
+def _load_active_trades():
+    """從 trades.csv 還原 open 狀態的持倉，防止 bot 重啟後重複開單"""
+    open_trades = tracker.get_open_trades()
+    for t in open_trades:
+        _active_trades[t['symbol']] = t['trade_id']
+    if _active_trades:
+        print(f"[啟動] 還原 {len(_active_trades)} 筆持倉: {list(_active_trades.keys())}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -165,8 +175,9 @@ def analyze_symbol(symbol: str):
         # 發送信號通知 (partial 和 perfect 都通知)
         ln.notify_signal(symbol, s, tfs, kill, disp)
 
-        # 下單條件：perfect + 殺戮區 + 強位移 + 未有持倉
-        if _should_enter(s, kill, disp) and symbol not in _active_trades:
+        # 下單條件：perfect + 殺戮區 + 強位移 + 未有持倉 + 未達最大持倉數
+        at_limit = config.MAX_OPEN_TRADES > 0 and len(_active_trades) >= config.MAX_OPEN_TRADES
+        if _should_enter(s, kill, disp) and symbol not in _active_trades and not at_limit:
             side  = 'BUY' if s['dir'] == 'LONG' else 'SELL'
             bc.set_leverage(symbol, config.LEVERAGE)
             order, actual_price, qty = bc.place_market_order(symbol, side, config.POSITION_USDT)
@@ -203,6 +214,9 @@ def main():
     print(f"  策略={config.ACTIVE_STRATEGY}  時框={config.PRIMARY_TF.upper()}")
     print(f"  幣種={config.SYMBOLS}  Testnet={config.BINANCE_TESTNET}")
     print(f"  需殺戮區={config.REQUIRE_KILL_ZONE}  需強位移={config.REQUIRE_STRONG_DISP}  最低RR={config.MIN_RR}")
+
+    # 啟動時從 CSV 還原持倉，防止 redeploy 後重複開單
+    _load_active_trades()
 
     ln.notify_startup(config.SYMBOLS, config.ACTIVE_STRATEGY, config.PRIMARY_TF, config.BINANCE_TESTNET)
 

@@ -25,6 +25,9 @@ MIN_RR             = float(os.environ.get('MIN_RR', '1.5'))
 # ── 每筆模擬倉位 (USDT) ──
 POSITION_USDT = float(os.environ.get('POSITION_USDT', '100'))
 
+# ── 最多同時持倉數量 (0 = 不限制，建議設 1~3) ──
+MAX_OPEN_TRADES = int(os.environ.get('MAX_OPEN_TRADES', '1'))
+
 # ── 槓桿倍數 (1~20，建議驗證期間用低槓桿) ──
 LEVERAGE = int(os.environ.get('LEVERAGE', '3'))
 
