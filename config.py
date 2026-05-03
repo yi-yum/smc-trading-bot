@@ -10,6 +10,7 @@ TF_MAP = {
     '15m': {'htf': '15m', 'mtf': '5m',  'ltf': '1m'},
     '1h':  {'htf': '1h',  'mtf': '15m', 'ltf': '5m'},
     '4h':  {'htf': '4h',  'mtf': '1h',  'ltf': '15m'},
+    '6h':  {'htf': '6h',  'mtf': '1h',  'ltf': '15m'},  # AdaptiveTrend 核心時框
     '1d':  {'htf': '1d',  'mtf': '4h',  'ltf': '1h'},
 }
 
@@ -40,3 +41,28 @@ BINANCE_TESTNET  = os.environ.get('BINANCE_TESTNET', 'true').lower() == 'true'
 SCAN_INTERVAL_SECONDS = int(os.environ.get('SCAN_INTERVAL_SECONDS', '3600'))
 
 TRADES_FILE = 'trades.csv'
+
+# ── AdaptiveTrend 策略參數 ──
+# 是否啟用 Strategy D (AdaptiveTrend 動量策略)
+AT_ENABLE        = os.environ.get('AT_ENABLE', 'false').lower() == 'true'
+
+# 動量回看週期 L (H6 K棒數，12~48 步長6，預設20根≈5天)
+AT_LOOKBACK_L    = int(os.environ.get('AT_LOOKBACK_L', '20'))
+
+# 動量進場閾值 θ_entry (0.01~0.05，超過此值才進場)
+AT_THETA_ENTRY   = float(os.environ.get('AT_THETA_ENTRY', '0.02'))
+
+# ATR 乘數 α (2.0~4.0，追蹤止損線距離)
+AT_ATR_MULT      = float(os.environ.get('AT_ATR_MULT', '2.5'))
+
+# 多頭資金比例 (70/30 架構)
+AT_LONG_RATIO    = float(os.environ.get('AT_LONG_RATIO', '0.7'))
+
+# Strategy D 進場判定：|MOM| 需超過 θ*perfect_factor 才為 perfect
+AT_PERFECT_FACTOR = float(os.environ.get('AT_PERFECT_FACTOR', '1.8'))
+
+# 月度資產篩選：多頭夏普比率門檻
+AT_MIN_SHARPE_LONG  = float(os.environ.get('AT_MIN_SHARPE_LONG', '1.3'))
+
+# 月度資產篩選：空頭夏普比率門檻 (更嚴格，因加密市場存在結構性上行偏誤)
+AT_MIN_SHARPE_SHORT = float(os.environ.get('AT_MIN_SHARPE_SHORT', '1.7'))

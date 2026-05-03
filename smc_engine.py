@@ -254,6 +254,50 @@ def build_smc_plan(candles, analysis):
 
 
 # ─────────────────────────────────────────────────────────────
+# AdaptiveTrend：動量信號 & ATR 追蹤止損
+# ─────────────────────────────────────────────────────────────
+def calc_momentum(candles: List[Dict], L: int) -> float:
+    """
+    計算動量得分 MOM_t = (P_t - P_{t-L}) / P_{t-L}
+    L: 回看窗口 (K棒數)
+    正值 → 上漲動量；負值 → 下跌動量
+    """
+    if len(candles) <= L:
+        return 0.0
+    p_t  = candles[-1]['c']
+    p_tL = candles[-1 - L]['c']
+    if p_tL == 0:
+        return 0.0
+    return (p_t - p_tL) / p_tL
+
+
+def calc_atr_trailing_stop(
+    candles: List[Dict],
+    alpha: float,
+    direction: str = 'LONG',
+    atr_period: int = 14
+) -> float:
+    """
+    計算 ATR 動態追蹤止損線目前值。
+    LONG : S_t = max(S_{t-1}, P_t - α * ATR_t)  → 單調遞增
+    SHORT: S_t = min(S_{t-1}, P_t + α * ATR_t)  → 單調遞減
+    回傳最新一根的止損價格。
+    """
+    atrs = calc_atr(candles, atr_period)
+    if direction == 'LONG':
+        stop = candles[0]['c'] - alpha * atrs[0]
+        for i in range(1, len(candles)):
+            candidate = candles[i]['c'] - alpha * atrs[i]
+            stop = max(stop, candidate)
+    else:
+        stop = candles[0]['c'] + alpha * atrs[0]
+        for i in range(1, len(candles)):
+            candidate = candles[i]['c'] + alpha * atrs[i]
+            stop = min(stop, candidate)
+    return stop
+
+
+# ─────────────────────────────────────────────────────────────
 # 位移強度 & 殺戮區
 # ─────────────────────────────────────────────────────────────
 def calc_displacement(candles, atrs):
@@ -280,7 +324,8 @@ def get_kill_zone():
 # ─────────────────────────────────────────────────────────────
 # 策略偵測 (A / B / C)
 # ─────────────────────────────────────────────────────────────
-def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis, ltf_candles, ltf_analysis, plan, tfs):
+def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis,
+                    ltf_candles, ltf_analysis, plan, tfs, at_params: Optional[Dict] = None):
     swing    = htf_analysis['swing']
     internal = htf_analysis['internal']
     fvgs     = htf_analysis['fvgs']
@@ -358,5 +403,46 @@ def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis, ltf_ca
             'near_any_poi': near_any_poi, 'ltf_confirm': ltf_confirm,
             'entry': plan.get('entry'), 'sl': plan.get('sl'), 'tp': plan.get('tp'), 'rr': plan.get('rr'),
         })
+
+    # ── 策略 D：AdaptiveTrend H6 動量 + ATR 追蹤止損 ──
+    if at_params:
+        L      = at_params.get('L', 20)
+        theta  = at_params.get('theta', 0.02)
+        alpha  = at_params.get('alpha', 2.5)
+        pf     = at_params.get('perfect_factor', 1.8)
+
+        mom = calc_momentum(htf_candles, L)
+        direction_at = None
+        if mom > theta:
+            direction_at = 'LONG'
+        elif mom < -theta:
+            direction_at = 'SHORT'
+
+        if direction_at:
+            atr_stop = calc_atr_trailing_stop(htf_candles, alpha, direction_at)
+            cur_atr  = atrs[-1]
+            cur_p    = htf_candles[-1]['c']
+
+            if direction_at == 'LONG':
+                entry = cur_p
+                sl    = atr_stop
+                # TP 設在 ATR 乘數 * 3 距離（計畫書無固定TP，此處保守估計）
+                tp    = entry + alpha * 3 * cur_atr
+            else:
+                entry = cur_p
+                sl    = atr_stop
+                tp    = entry - alpha * 3 * cur_atr
+
+            rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else None
+            match = 'perfect' if abs(mom) >= theta * pf else 'partial'
+
+            strategies.append({
+                'id': 'D', 'name': 'AdaptiveTrend動量', 'match': match,
+                'dir': direction_at,
+                'mom_score': round(mom, 4),
+                'theta': theta,
+                'atr_stop': round(atr_stop, 4),
+                'entry': entry, 'sl': sl, 'tp': tp, 'rr': rr,
+            })
 
     return strategies, disp, kill

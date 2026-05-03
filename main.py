@@ -11,6 +11,7 @@ import smc_engine
 import binance_client as bc
 import line_notify as ln
 import tracker
+import adaptive_trend as at_module
 
 # 記錄每個幣種上次處理的 HTF K棒時間，避免重複觸發
 _last_candle_time: dict = {}
@@ -52,6 +53,23 @@ def _should_enter(s: dict, kill: dict, disp: dict) -> bool:
 # ─────────────────────────────────────────────────────────────
 # 監控持倉是否觸及 TP / SL
 # ─────────────────────────────────────────────────────────────
+def _close_trade_record(trade: dict, exit_price: float, is_win: bool):
+    """共用的平倉記錄邏輯"""
+    symbol = trade['symbol']
+    dire   = trade['direction']
+    entry  = float(trade['entry_price'])
+    pnl    = (exit_price - entry) * float(trade['qty']) if dire == 'LONG' \
+             else (entry - exit_price) * float(trade['qty'])
+    result = 'win' if is_win else 'loss'
+    tracker.close_trade(trade['trade_id'], exit_price, result)
+    bc.cancel_all_orders(symbol)
+    stats = tracker.get_stats()
+    ln.notify_exit(symbol, dire, entry, exit_price, pnl, is_win, stats)
+    if symbol in _active_trades:
+        del _active_trades[symbol]
+    print(f"[{_now()}] {symbol} 平倉: {result} @ {exit_price:.2f}  PNL={pnl:+.2f}")
+
+
 def check_open_trades():
     open_trades = tracker.get_open_trades()
     for trade in open_trades:
@@ -63,24 +81,30 @@ def check_open_trades():
             sl_p  = float(trade['sl'])
             dire  = trade['direction']
 
+            # ── Strategy D：用 ATR 追蹤止損取代靜態止損 ──
+            if trade.get('strategy') == 'D' and config.AT_ENABLE:
+                tfs = config.TF_MAP.get(config.PRIMARY_TF, config.TF_MAP['4h'])
+                candles = bc.fetch_candles(symbol, tfs['htf'], config.CANDLE_LIMIT)
+                if candles:
+                    atr_stop = smc_engine.calc_atr_trailing_stop(
+                        candles, config.AT_ATR_MULT, dire
+                    )
+                    hit_atr_stop = (dire == 'LONG'  and cur <= atr_stop) or \
+                                   (dire == 'SHORT' and cur >= atr_stop)
+                    hit_tp       = (dire == 'LONG'  and cur >= tp) or \
+                                   (dire == 'SHORT' and cur <= tp)
+                    if hit_tp or hit_atr_stop:
+                        _close_trade_record(trade, cur, hit_tp)
+                        print(f"  {'TP 達成' if hit_tp else f'ATR止損觸發 @ {atr_stop:.4f}'}")
+                continue  # D 策略不走下方靜態邏輯
+
+            # ── 其他策略：靜態 TP / SL ──
             hit_tp = (dire == 'LONG'  and cur >= tp) or (dire == 'SHORT' and cur <= tp)
             hit_sl = (dire == 'LONG'  and cur <= sl_p) or (dire == 'SHORT' and cur >= sl_p)
 
             if hit_tp or hit_sl:
-                result     = 'win' if hit_tp else 'loss'
                 exit_price = tp if hit_tp else sl_p
-                pnl        = (exit_price - entry) * float(trade['qty']) if dire == 'LONG' \
-                             else (entry - exit_price) * float(trade['qty'])
-
-                tracker.close_trade(trade['trade_id'], exit_price, result)
-                bc.cancel_all_orders(symbol)
-                stats = tracker.get_stats()
-                ln.notify_exit(symbol, dire, entry, exit_price, pnl, hit_tp, stats)
-
-                if symbol in _active_trades:
-                    del _active_trades[symbol]
-
-                print(f"[{_now()}] {symbol} 平倉: {result} @ {exit_price:.2f}  PNL={pnl:+.2f}")
+                _close_trade_record(trade, exit_price, hit_tp)
 
         except Exception as e:
             print(f"[{_now()}] check_open_trades({symbol}) error: {e}")
@@ -108,11 +132,22 @@ def analyze_symbol(symbol: str):
     ltf_analysis = smc_engine.smc_analyze(ltf_candles)
     plan         = smc_engine.build_smc_plan(htf_candles, htf_analysis)
 
+    # 若啟用 AdaptiveTrend，傳入 at_params 觸發 Strategy D
+    at_params = None
+    if config.AT_ENABLE:
+        at_params = {
+            'L':             config.AT_LOOKBACK_L,
+            'theta':         config.AT_THETA_ENTRY,
+            'alpha':         config.AT_ATR_MULT,
+            'perfect_factor': config.AT_PERFECT_FACTOR,
+        }
+
     strategies, disp, kill = smc_engine.detect_strategy(
         htf_candles, htf_analysis,
         mtf_candles, mtf_analysis,
         ltf_candles, ltf_analysis,
-        plan, tfs
+        plan, tfs,
+        at_params=at_params,
     )
 
     active_strat = config.ACTIVE_STRATEGY  # 'A' / 'B' / 'C' / 'ALL'
@@ -171,10 +206,38 @@ def main():
 
     ln.notify_startup(config.SYMBOLS, config.ACTIVE_STRATEGY, config.PRIMARY_TF, config.BINANCE_TESTNET)
 
-    last_daily_date = None
+    last_daily_date   = None
+    last_monthly_date = None
+
+    # 若啟用 AdaptiveTrend，啟動時先執行月度篩選
+    if config.AT_ENABLE:
+        print(f"[{_now()}] AdaptiveTrend 已啟用，執行首次月度資產篩選...")
+        try:
+            at_symbols = at_module.refresh_monthly_assets()
+            if at_symbols:
+                # 將 AT 篩選出的幣種加入監控清單（不重複）
+                for s in at_symbols:
+                    if s not in config.SYMBOLS:
+                        config.SYMBOLS.append(s)
+                print(f"[{_now()}] AT 監控幣種: {at_symbols}")
+        except Exception as e:
+            print(f"[{_now()}] AT 初始篩選失敗: {e}")
 
     while True:
         now_utc = datetime.now(timezone.utc)
+
+        # 每月 1 日 00:05 UTC 執行月度資產篩選 (AT_ENABLE)
+        if config.AT_ENABLE and now_utc.day == 1 and now_utc.hour == 0 and \
+                now_utc.minute < 10 and last_monthly_date != now_utc.date():
+            try:
+                at_symbols = at_module.refresh_monthly_assets()
+                # 重建監控清單：原始 SMC 標的 + AT 篩選標的
+                base = ['BTCUSDT', 'ETHUSDT']
+                config.SYMBOLS = list(dict.fromkeys(base + at_symbols))
+                last_monthly_date = now_utc.date()
+                ln.send(f"[AdaptiveTrend] 月度篩選完成\n多頭: {at_module._monthly_long}\n空頭: {at_module._monthly_short}")
+            except Exception as e:
+                print(f"[{_now()}] AT monthly refresh error: {e}")
 
         # 每日 00:05 UTC 發統計報告
         if now_utc.hour == 0 and now_utc.minute < 10 and last_daily_date != now_utc.date():
