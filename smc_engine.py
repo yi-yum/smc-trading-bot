@@ -357,8 +357,10 @@ def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis,
         })
 
     # ── 策略 B：HTF FVG 識別 + MTF 方向確認 ──
+    # 修正：price 必須在 FVG 區間內（pullback 進缺口），而非只是穿越底部
     pullback_fvgs = [f for f in active_fvgs if
-                     (f['type'] == 'bull' and cur > f['bottom']) or (f['type'] == 'bear' and cur < f['top'])]
+                     (f['type'] == 'bull' and f['bottom'] <= cur <= f['top']) or
+                     (f['type'] == 'bear' and f['bottom'] <= cur <= f['top'])]
     if pullback_fvgs:
         top_fvg   = pullback_fvgs[-1]
         ce        = (top_fvg['top'] + top_fvg['bottom']) / 2
@@ -366,12 +368,18 @@ def detect_strategy(htf_candles, htf_analysis, mtf_candles, mtf_analysis,
         mtf_aligned = (top_fvg['type'] == 'bull' and mtf_analysis['swing']['trend_bias'] == BULL) or \
                       (top_fvg['type'] == 'bear' and mtf_analysis['swing']['trend_bias'] == BEAR)
         match = 'perfect' if dist_pct < 1.5 else 'partial' if dist_pct < 4 else 'watch'
-        sl_price  = top_fvg['bottom'] * 0.998 if top_fvg['type'] == 'bull' else top_fvg['top'] * 1.002
-        # TP: 與 index.html 一致 — 用結構高低點（而非主計畫TP，主計畫方向可能與FVG方向相反）
-        tr_high = htf_analysis.get('tr_high', ce + abs(ce - sl_price) * 3)
-        tr_low  = htf_analysis.get('tr_low',  ce - abs(ce - sl_price) * 3)
-        tp_price  = tr_high if top_fvg['type'] == 'bull' else tr_low
-        rr        = abs(tp_price - ce) / abs(ce - sl_price) if sl_price and tp_price else None
+        sl_price = top_fvg['bottom'] * 0.998 if top_fvg['type'] == 'bull' else top_fvg['top'] * 1.002
+        sl_dist  = abs(ce - sl_price)
+
+        # 修正：TP 以 SL 距離倍數為上限（最大 5x），避免用歷史極值造成 RR 失真
+        tr_high = htf_analysis.get('tr_high', ce + sl_dist * 5)
+        tr_low  = htf_analysis.get('tr_low',  ce - sl_dist * 5)
+        max_rr  = 5.0
+        if top_fvg['type'] == 'bull':
+            tp_price = min(tr_high, ce + max_rr * sl_dist)
+        else:
+            tp_price = max(tr_low,  ce - max_rr * sl_dist)
+        rr = abs(tp_price - ce) / sl_dist if sl_dist > 0 else None
 
         strategies.append({
             'id': 'B', 'name': '大時區FVG填充', 'match': match,
