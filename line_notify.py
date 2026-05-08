@@ -127,5 +127,21 @@ def notify_daily_summary(stats):
 總損益: {sign}${stats['total_pnl']:.2f}""")
 
 
+def notify_st_entry(symbol: str, entry_price: float, state: dict, qty: float, order_id, tf: str):
+    """Triple Supertrend 進場通知"""
+    sym   = symbol.replace('USDT', '')
+    icons = ['🟢' if d == -1 else '🔴' for d in state['directions']]
+    sts   = state['st_values']
+    send(f"""
+🟢 [TST 進場] {sym} LONG  {tf.upper()}
+進場價: ${_fmt(entry_price)}
+數量: {qty} {sym}
+ST1(11/2.0): ${_fmt(sts[0])} {icons[0]}
+ST2(10/1.0): ${_fmt(sts[1])} {icons[1]}
+ST3(12/3.0): ${_fmt(sts[2])} {icons[2]}
+訂單: #{order_id}
+出場條件: 任一翻紅+低於進場 / 全紅""")
+
+
 def notify_error(msg: str):
     send(f"\n⚠ [Bot 錯誤]\n{msg}")

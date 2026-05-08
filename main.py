@@ -1,28 +1,27 @@
 """
-SMC Signal Bot — 主程式
-自動掃描信號、下測試網單、LINE 通知、記錄勝率
+Triple Supertrend Signal Bot — 主程式
+策略：三條全綠進場，任一翻紅+低於進場價止損 / 全紅退場
+基礎設施（Binance / LINE / tracker）沿用原架構
 """
 import time
 import traceback
 from datetime import datetime, timezone
 
 import config
-import smc_engine
+import triple_st
 import binance_client as bc
 import line_notify as ln
 import tracker
-import adaptive_trend as at_module
 
-# 記錄每個幣種上次處理的 HTF K棒時間，避免重複觸發
+# 記錄每個幣種上次處理的 K棒時間，避免重複觸發
 _last_candle_time: dict = {}
 
-# 記錄目前持倉中的交易 {symbol: trade_id}
-# 注意：啟動時由 _load_active_trades() 從 CSV 還原，避免重啟後失憶
+# 目前持倉中的交易 {symbol: trade_id}
 _active_trades: dict = {}
 
 
 def _load_active_trades():
-    """從 trades.csv 還原 open 狀態的持倉，防止 bot 重啟後重複開單"""
+    """從 trades.csv 還原 open 狀態的持倉，防止重啟後重複開單"""
     open_trades = tracker.get_open_trades()
     for t in open_trades:
         _active_trades[t['symbol']] = t['trade_id']
@@ -30,91 +29,59 @@ def _load_active_trades():
         print(f"[啟動] 還原 {len(_active_trades)} 筆持倉: {list(_active_trades.keys())}")
 
 
-# ─────────────────────────────────────────────────────────────
-# 輔助函數
-# ─────────────────────────────────────────────────────────────
-def _is_new_candle(symbol: str, htf_candles: list) -> bool:
-    """只在新的 HTF K棒收盤後才觸發分析"""
-    if not htf_candles:
+def _is_new_candle(symbol: str, candles: list) -> bool:
+    """只在新 K棒收盤後才觸發分析（用倒數第二根，已確定收盤）"""
+    if not candles or len(candles) < 2:
         return False
-    latest_t = htf_candles[-2]['t']  # 用倒數第二根 (已收盤的最新K棒)
+    latest_t = candles[-2]['t']
     if _last_candle_time.get(symbol) == latest_t:
         return False
     _last_candle_time[symbol] = latest_t
     return True
 
 
-def _should_enter(s: dict, kill: dict, disp: dict) -> bool:
-    """判斷是否滿足下單門檻"""
-    if s['match'] != 'perfect':
-        return False
-    if config.REQUIRE_KILL_ZONE and not kill['active']:
-        return False
-    if config.REQUIRE_STRONG_DISP and not disp['strong']:
-        return False
-    rr = s.get('rr') or 0
-    if rr < config.MIN_RR:
-        return False
-    if not all([s.get('dir'), s.get('entry'), s.get('sl'), s.get('tp')]):
-        return False
-    return True
+def _now() -> str:
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 # ─────────────────────────────────────────────────────────────
-# 監控持倉是否觸及 TP / SL
+# 監控持倉 TP / SL（Triple ST：動態出場，每次掃描重新計算）
 # ─────────────────────────────────────────────────────────────
-def _close_trade_record(trade: dict, exit_price: float, is_win: bool):
-    """共用的平倉記錄邏輯"""
-    symbol = trade['symbol']
-    dire   = trade['direction']
-    entry  = float(trade['entry_price'])
-    pnl    = (exit_price - entry) * float(trade['qty']) if dire == 'LONG' \
-             else (entry - exit_price) * float(trade['qty'])
-    result = 'win' if is_win else 'loss'
-    tracker.close_trade(trade['trade_id'], exit_price, result)
-    bc.cancel_all_orders(symbol)
-    stats = tracker.get_stats()
-    ln.notify_exit(symbol, dire, entry, exit_price, pnl, is_win, stats)
-    if symbol in _active_trades:
-        del _active_trades[symbol]
-    print(f"[{_now()}] {symbol} 平倉: {result} @ {exit_price:.2f}  PNL={pnl:+.2f}")
-
-
 def check_open_trades():
     open_trades = tracker.get_open_trades()
     for trade in open_trades:
-        symbol = trade['symbol']
+        symbol      = trade['symbol']
+        entry_price = float(trade['entry_price'])
+        direction   = trade['direction']
         try:
-            cur   = bc.get_price(symbol)
-            entry = float(trade['entry_price'])
-            tp    = float(trade['tp'])
-            sl_p  = float(trade['sl'])
-            dire  = trade['direction']
+            candles = bc.fetch_candles(symbol, config.ST_TIMEFRAME, config.CANDLE_LIMIT)
+            if not candles:
+                continue
 
-            # ── Strategy D：用 ATR 追蹤止損取代靜態止損 ──
-            if trade.get('strategy') == 'D' and config.AT_ENABLE:
-                tfs = config.TF_MAP.get(config.PRIMARY_TF, config.TF_MAP['4h'])
-                candles = bc.fetch_candles(symbol, tfs['htf'], config.CANDLE_LIMIT)
-                if candles:
-                    atr_stop = smc_engine.calc_atr_trailing_stop(
-                        candles, config.AT_ATR_MULT, dire
-                    )
-                    hit_atr_stop = (dire == 'LONG'  and cur <= atr_stop) or \
-                                   (dire == 'SHORT' and cur >= atr_stop)
-                    hit_tp       = (dire == 'LONG'  and cur >= tp) or \
-                                   (dire == 'SHORT' and cur <= tp)
-                    if hit_tp or hit_atr_stop:
-                        _close_trade_record(trade, cur, hit_tp)
-                        print(f"  {'TP 達成' if hit_tp else f'ATR止損觸發 @ {atr_stop:.4f}'}")
-                continue  # D 策略不走下方靜態邏輯
+            state = triple_st.analyze(candles)
+            exit_now, reason = triple_st.should_exit(state, entry_price)
 
-            # ── 其他策略：靜態 TP / SL ──
-            hit_tp = (dire == 'LONG'  and cur >= tp) or (dire == 'SHORT' and cur <= tp)
-            hit_sl = (dire == 'LONG'  and cur <= sl_p) or (dire == 'SHORT' and cur >= sl_p)
+            dir_icons = ['🟢' if d == -1 else '🔴' for d in state['directions']]
+            print(f"  [{symbol}] 持倉檢查 ST={dir_icons} cur={state['cur_price']:.2f} entry={entry_price:.2f}")
 
-            if hit_tp or hit_sl:
-                exit_price = tp if hit_tp else sl_p
-                _close_trade_record(trade, exit_price, hit_tp)
+            if exit_now:
+                cur_price = bc.get_price(symbol)
+                qty       = float(trade['qty'])
+                pnl       = (cur_price - entry_price) * qty if direction == 'LONG' \
+                            else (entry_price - cur_price) * qty
+                result    = 'win' if pnl > 0 else 'loss'
+
+                tracker.close_trade(trade['trade_id'], cur_price, result)
+                bc.cancel_all_orders(symbol)
+
+                stats = tracker.get_stats()
+                ln.notify_exit(symbol, direction, entry_price, cur_price, pnl, pnl > 0, stats)
+                ln.send(f"📌 出場原因：{reason}")
+
+                if symbol in _active_trades:
+                    del _active_trades[symbol]
+
+                print(f"  [{symbol}] 平倉: {result} @ {cur_price:.2f}  PNL={pnl:+.2f}  原因={reason}")
 
         except Exception as e:
             print(f"[{_now()}] check_open_trades({symbol}) error: {e}")
@@ -124,134 +91,61 @@ def check_open_trades():
 # 分析單一幣種
 # ─────────────────────────────────────────────────────────────
 def analyze_symbol(symbol: str):
-    tfs = config.TF_MAP.get(config.PRIMARY_TF, config.TF_MAP['4h'])
-
-    # 先只抓 HTF 判斷是否為新K棒，節省 API 呼叫
-    htf_candles = bc.fetch_candles(symbol, tfs['htf'], config.CANDLE_LIMIT)
-    if not _is_new_candle(symbol, htf_candles):
+    candles = bc.fetch_candles(symbol, config.ST_TIMEFRAME, config.CANDLE_LIMIT)
+    if not candles:
         return
 
-    print(f"[{_now()}] 分析 {symbol}  {tfs['htf'].upper()}/{tfs['mtf'].upper()}/{tfs['ltf'].upper()}")
+    if not _is_new_candle(symbol, candles):
+        return
 
-    # 平行抓三個時框 (依序呼叫，避免 rate limit)
-    mtf_candles = bc.fetch_candles(symbol, tfs['mtf'], config.CANDLE_LIMIT)
-    ltf_candles = bc.fetch_candles(symbol, tfs['ltf'], config.CANDLE_LIMIT)
+    state     = triple_st.analyze(candles)
+    dir_icons = ['🟢' if d == -1 else '🔴' for d in state['directions']]
+    print(f"[{_now()}] {symbol} {config.ST_TIMEFRAME.upper()}  ST={dir_icons}  "
+          f"all_green={state['all_green']}  price={state['cur_price']:.2f}")
 
-    htf_analysis = smc_engine.smc_analyze(htf_candles)
-    mtf_analysis = smc_engine.smc_analyze(mtf_candles)
-    ltf_analysis = smc_engine.smc_analyze(ltf_candles)
-    plan         = smc_engine.build_smc_plan(htf_candles, htf_analysis)
+    # ── 進場 ──────────────────────────────────────────────────
+    at_limit = config.MAX_OPEN_TRADES > 0 and len(_active_trades) >= config.MAX_OPEN_TRADES
 
-    # 若啟用 AdaptiveTrend，傳入 at_params 觸發 Strategy D
-    at_params = None
-    if config.AT_ENABLE:
-        at_params = {
-            'L':             config.AT_LOOKBACK_L,
-            'theta':         config.AT_THETA_ENTRY,
-            'alpha':         config.AT_ATR_MULT,
-            'perfect_factor': config.AT_PERFECT_FACTOR,
-        }
+    if triple_st.should_enter(state) and symbol not in _active_trades and not at_limit:
+        side = 'BUY'  # 策略為純做多
+        bc.set_leverage(symbol, config.LEVERAGE)
+        order, actual_price, qty = bc.place_market_order(symbol, side, config.POSITION_USDT)
 
-    strategies, disp, kill = smc_engine.detect_strategy(
-        htf_candles, htf_analysis,
-        mtf_candles, mtf_analysis,
-        ltf_candles, ltf_analysis,
-        plan, tfs,
-        at_params=at_params,
-    )
+        if order and actual_price and qty:
+            trade_id = tracker.add_trade(
+                symbol, 'TST', 'LONG', actual_price,
+                sl=0, tp=0, qty=qty,
+                order_id=order.get('orderId', '')
+            )
+            _active_trades[symbol] = trade_id
+            ln.notify_st_entry(symbol, actual_price, state, qty,
+                               order.get('orderId', ''), config.ST_TIMEFRAME)
+            print(f"  ✅ 進場 LONG @ {actual_price:.2f}  qty={qty}")
+        else:
+            print(f"  ❌ 下單失敗")
 
-    active_strat = config.ACTIVE_STRATEGY  # 'A' / 'B' / 'C' / 'ALL'
-
-    for s in strategies:
-        # 篩選啟用的策略
-        if active_strat != 'ALL' and s['id'] != active_strat:
-            continue
-        if s['match'] == 'watch':
-            continue
-
-        rr_display = f"{s['rr']:.1f}" if s.get('rr') else 'N/A'
-        print(f"  策略{s['id']} match={s['match']} dir={s.get('dir')} rr={rr_display}")
-
-        # 發送信號通知 (partial 和 perfect 都通知)
-        ln.notify_signal(symbol, s, tfs, kill, disp)
-
-        # 下單條件：perfect + 殺戮區 + 強位移 + 未有持倉 + 未達最大持倉數
-        at_limit = config.MAX_OPEN_TRADES > 0 and len(_active_trades) >= config.MAX_OPEN_TRADES
-        if _should_enter(s, kill, disp) and symbol not in _active_trades and not at_limit:
-            side  = 'BUY' if s['dir'] == 'LONG' else 'SELL'
-            bc.set_leverage(symbol, config.LEVERAGE)
-            order, actual_price, qty = bc.place_market_order(symbol, side, config.POSITION_USDT)
-
-            if order and actual_price and qty:
-                tp = s['tp']
-                sl = s['sl']
-                bc.place_tp_sl(symbol, side, qty, tp, sl)
-
-                trade_id = tracker.add_trade(
-                    symbol, s['id'], s['dir'], actual_price, sl, tp, qty,
-                    order.get('orderId', '')
-                )
-                _active_trades[symbol] = trade_id
-
-                ln.notify_entry(
-                    symbol, s['id'], s['dir'], actual_price, sl, tp,
-                    s['rr'], qty, order.get('orderId', ''), tfs
-                )
-                print(f"  ✅ 下單成功: {s['dir']} @ {actual_price:.2f}  qty={qty}  TP={tp:.2f}  SL={sl:.2f}")
-            else:
-                print(f"  ❌ 下單失敗")
+    # ── 未持倉但出現出場信號（非全綠）→ 僅通知觀察 ──────────────
+    elif symbol not in _active_trades and state['any_red']:
+        count_red = sum(1 for d in state['directions'] if d == 1)
+        print(f"  ⚠ 非全綠，{count_red}/3 條看空，等待進場")
 
 
 # ─────────────────────────────────────────────────────────────
 # 主迴圈
 # ─────────────────────────────────────────────────────────────
-def _now() -> str:
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-
 def main():
-    print(f"[{_now()}] SMC Signal Bot 啟動")
-    print(f"  策略={config.ACTIVE_STRATEGY}  時框={config.PRIMARY_TF.upper()}")
-    print(f"  幣種={config.SYMBOLS}  Testnet={config.BINANCE_TESTNET}")
-    print(f"  需殺戮區={config.REQUIRE_KILL_ZONE}  需強位移={config.REQUIRE_STRONG_DISP}  最低RR={config.MIN_RR}")
+    print(f"[{_now()}] Triple Supertrend Bot 啟動")
+    print(f"  時框={config.ST_TIMEFRAME.upper()}  幣種={config.SYMBOLS}")
+    print(f"  倉位={config.POSITION_USDT}U  槓桿={config.LEVERAGE}x  "
+          f"最多持倉={config.MAX_OPEN_TRADES}  Testnet={config.BINANCE_TESTNET}")
 
-    # 啟動時從 CSV 還原持倉，防止 redeploy 後重複開單
     _load_active_trades()
+    ln.notify_startup(config.SYMBOLS, 'Triple Supertrend', config.ST_TIMEFRAME, config.BINANCE_TESTNET)
 
-    ln.notify_startup(config.SYMBOLS, config.ACTIVE_STRATEGY, config.PRIMARY_TF, config.BINANCE_TESTNET)
-
-    last_daily_date   = None
-    last_monthly_date = None
-
-    # 若啟用 AdaptiveTrend，啟動時先執行月度篩選
-    if config.AT_ENABLE:
-        print(f"[{_now()}] AdaptiveTrend 已啟用，執行首次月度資產篩選...")
-        try:
-            at_symbols = at_module.refresh_monthly_assets()
-            if at_symbols:
-                # 將 AT 篩選出的幣種加入監控清單（不重複）
-                for s in at_symbols:
-                    if s not in config.SYMBOLS:
-                        config.SYMBOLS.append(s)
-                print(f"[{_now()}] AT 監控幣種: {at_symbols}")
-        except Exception as e:
-            print(f"[{_now()}] AT 初始篩選失敗: {e}")
+    last_daily_date = None
 
     while True:
         now_utc = datetime.now(timezone.utc)
-
-        # 每月 1 日 00:05 UTC 執行月度資產篩選 (AT_ENABLE)
-        if config.AT_ENABLE and now_utc.day == 1 and now_utc.hour == 0 and \
-                now_utc.minute < 10 and last_monthly_date != now_utc.date():
-            try:
-                at_symbols = at_module.refresh_monthly_assets()
-                # 重建監控清單：原始 SMC 標的 + AT 篩選標的
-                base = ['BTCUSDT', 'ETHUSDT']
-                config.SYMBOLS = list(dict.fromkeys(base + at_symbols))
-                last_monthly_date = now_utc.date()
-                ln.send(f"[AdaptiveTrend] 月度篩選完成\n多頭: {at_module._monthly_long}\n空頭: {at_module._monthly_short}")
-            except Exception as e:
-                print(f"[{_now()}] AT monthly refresh error: {e}")
 
         # 每日 00:05 UTC 發統計報告
         if now_utc.hour == 0 and now_utc.minute < 10 and last_daily_date != now_utc.date():
@@ -262,13 +156,13 @@ def main():
             except Exception as e:
                 print(f"[{_now()}] daily summary error: {e}")
 
-        # 檢查持倉 TP/SL
+        # 檢查持倉出場條件
         try:
             check_open_trades()
         except Exception as e:
             print(f"[{_now()}] check_open_trades error: {e}")
 
-        # 掃描所有幣種
+        # 掃描所有幣種尋找進場機會
         for symbol in config.SYMBOLS:
             try:
                 analyze_symbol(symbol)

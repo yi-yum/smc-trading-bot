@@ -3,7 +3,10 @@ import os
 # ── 監控標的 ──
 SYMBOLS = ['BTCUSDT', 'ETHUSDT']
 
-# ── 主時框架 ──
+# ── Triple Supertrend 時框（單一時框，不需 HTF/MTF/LTF）──
+ST_TIMEFRAME = os.environ.get('ST_TIMEFRAME', '4h')  # 建議: 1h / 4h / 1d
+
+# ── 主時框架（SMC 舊設定，保留備用）──
 PRIMARY_TF = os.environ.get('PRIMARY_TF', '4h')  # 可改: 15m / 1h / 4h / 1d
 
 TF_MAP = {
